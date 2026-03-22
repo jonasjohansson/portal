@@ -31,6 +31,34 @@ controls.dampingFactor = 0.05;
 controls.maxPolarAngle = Math.PI * 0.85;
 controls.update();
 
+// --- WASD movement ---
+const keys = {};
+const moveSpeed = 0.08;
+window.addEventListener("keydown", (e) => (keys[e.code] = true));
+window.addEventListener("keyup", (e) => (keys[e.code] = false));
+
+function updateMovement() {
+  const forward = new THREE.Vector3();
+  camera.getWorldDirection(forward);
+  forward.y = 0;
+  forward.normalize();
+  const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
+
+  const move = new THREE.Vector3();
+  if (keys["KeyW"]) move.add(forward);
+  if (keys["KeyS"]) move.sub(forward);
+  if (keys["KeyD"]) move.add(right);
+  if (keys["KeyA"]) move.sub(right);
+  if (keys["Space"]) move.y += 1;
+  if (keys["ShiftLeft"] || keys["ShiftRight"]) move.y -= 1;
+
+  if (move.lengthSq() > 0) {
+    move.normalize().multiplyScalar(moveSpeed);
+    camera.position.add(move);
+    controls.target.add(move);
+  }
+}
+
 // --- Render target for scene B ---
 const dpr = Math.min(window.devicePixelRatio, 2);
 let portalRT = new THREE.WebGLRenderTarget(
@@ -423,6 +451,7 @@ document.body.appendChild(overlay);
 // ============================================================
 function animate() {
   requestAnimationFrame(animate);
+  updateMovement();
   controls.update();
 
   const t = performance.now() * 0.001;
