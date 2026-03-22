@@ -1,5 +1,8 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 
 // --- Renderer ---
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -7,6 +10,8 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
 document.body.appendChild(renderer.domElement);
 
 // --- Camera ---
@@ -26,11 +31,15 @@ controls.dampingFactor = 0.05;
 controls.maxPolarAngle = Math.PI * 0.85;
 controls.update();
 
-// --- Render target for scene B (matches screen size) ---
+// --- Render target for scene B ---
+const dpr = Math.min(window.devicePixelRatio, 2);
 let portalRT = new THREE.WebGLRenderTarget(
-  window.innerWidth * Math.min(window.devicePixelRatio, 2),
-  window.innerHeight * Math.min(window.devicePixelRatio, 2)
+  window.innerWidth * dpr,
+  window.innerHeight * dpr
 );
+
+// --- Post-processing (bloom) ---
+const composer = new EffectComposer(renderer);
 
 // ============================================================
 // PORTAL DIMENSIONS
@@ -46,6 +55,7 @@ const portalZ = 0;
 // SCENE A — Desert world (outer)
 // ============================================================
 const sceneA = new THREE.Scene();
+sceneA.fog = new THREE.FogExp2(0xb8764a, 0.012);
 
 const skyCanvasA = createGradientSky(
   ["#1a0533", "#6b2fa0", "#d4556b", "#f4a261", "#e9c46a"],
@@ -108,17 +118,24 @@ createRailroad(sceneA);
 // Yellow ball A
 const ball = new THREE.Mesh(
   new THREE.SphereGeometry(0.12, 16, 16),
-  new THREE.MeshStandardMaterial({ color: 0xffdd00, roughness: 0.3 })
+  new THREE.MeshStandardMaterial({
+    color: 0xffdd00,
+    roughness: 0.3,
+    emissive: 0xffaa00,
+    emissiveIntensity: 0.3,
+  })
 );
 ball.position.set(-1.8, 0.12, 3);
 ball.castShadow = true;
 sceneA.add(ball);
 
-// --- Portal frame (visible border) ---
+// --- Portal frame ---
 const frameMat = new THREE.MeshStandardMaterial({
   color: 0xdddddd,
-  roughness: 0.25,
-  metalness: 0.6,
+  roughness: 0.15,
+  metalness: 0.9,
+  emissive: 0x4488ff,
+  emissiveIntensity: 0.15,
 });
 
 const frameShape = new THREE.Shape();
@@ -153,25 +170,50 @@ frameMesh.castShadow = true;
 frameMesh.receiveShadow = true;
 sceneA.add(frameMesh);
 
-// --- Portal plane (shows scene B via screen-space UV mapping) ---
+// Portal glow light
+const portalGlow = new THREE.PointLight(0x4488ff, 2, 15);
+portalGlow.position.set(0, portalY, portalZ + 1);
+sceneA.add(portalGlow);
+
+// --- Portal plane (screen-space UV shader with chromatic aberration) ---
 const portalMat = new THREE.ShaderMaterial({
   uniforms: {
     tPortal: { value: portalRT.texture },
+    time: { value: 0 },
   },
   vertexShader: `
     varying vec4 vClipPos;
+    varying vec2 vUv;
     void main() {
       gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       vClipPos = gl_Position;
+      vUv = uv;
     }
   `,
   fragmentShader: `
     uniform sampler2D tPortal;
+    uniform float time;
     varying vec4 vClipPos;
+    varying vec2 vUv;
     void main() {
-      // Convert clip-space to screen-space UV
       vec2 uv = (vClipPos.xy / vClipPos.w) * 0.5 + 0.5;
-      gl_FragColor = texture2D(tPortal, uv);
+
+      // Chromatic aberration at edges
+      vec2 center = vUv - 0.5;
+      float dist = length(center);
+      float aberration = dist * 0.006 * (1.0 + sin(time * 1.5) * 0.5);
+
+      float r = texture2D(tPortal, uv + vec2(aberration, 0.0)).r;
+      float g = texture2D(tPortal, uv).g;
+      float b = texture2D(tPortal, uv - vec2(aberration, 0.0)).b;
+
+      // Subtle edge glow
+      float edgeDist = min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y));
+      float edgeGlow = exp(-edgeDist * 20.0) * 0.25 * (1.0 + sin(time * 2.0) * 0.3);
+      vec3 glowColor = vec3(0.3, 0.5, 1.0);
+
+      vec3 color = vec3(r, g, b) + glowColor * edgeGlow;
+      gl_FragColor = vec4(color, 1.0);
     }
   `,
 });
@@ -183,12 +225,16 @@ const portalMesh = new THREE.Mesh(
 portalMesh.position.set(0, portalY, portalZ);
 sceneA.add(portalMesh);
 
+// --- Dust particles (scene A — warm) ---
+const dustA = createDustParticles(300, 0xffcc88, 0.6);
+sceneA.add(dustA.points);
+
 // ============================================================
-// SCENE B — Blue night pier world (seen through portal)
+// SCENE B — Blue night pier world
 // ============================================================
 const sceneB = new THREE.Scene();
+sceneB.fog = new THREE.FogExp2(0x0a2342, 0.015);
 
-// Sky sphere
 const skyCanvasB = createGradientSky(
   ["#020b1a", "#0a2342", "#0f4c75", "#3282b8", "#5cb8e4"],
   1024
@@ -221,10 +267,14 @@ pierTop.castShadow = true;
 sceneB.add(pierTop);
 
 // Pier plank lines
+const plankMat = new THREE.MeshStandardMaterial({
+  color: 0xaa3344,
+  roughness: 0.7,
+});
 for (let z = -40; z <= 10; z += 0.4) {
   const plank = new THREE.Mesh(
     new THREE.BoxGeometry(4, 0.16, 0.02),
-    new THREE.MeshStandardMaterial({ color: 0xaa3344, roughness: 0.7 })
+    plankMat
   );
   plank.position.set(0, 0.51, z);
   sceneB.add(plank);
@@ -289,11 +339,34 @@ sceneB.add(new THREE.AmbientLight(0x4488bb, 0.5));
 // Yellow ball B
 const ballB = new THREE.Mesh(
   new THREE.SphereGeometry(0.12, 16, 16),
-  new THREE.MeshStandardMaterial({ color: 0xffdd00, roughness: 0.3 })
+  new THREE.MeshStandardMaterial({
+    color: 0xffdd00,
+    roughness: 0.3,
+    emissive: 0xffaa00,
+    emissiveIntensity: 0.3,
+  })
 );
 ballB.position.set(1.2, 0.62, 3);
 ballB.castShadow = true;
 sceneB.add(ballB);
+
+// Dust particles (scene B — cool)
+const dustB = createDustParticles(300, 0x88ccff, 0.4);
+sceneB.add(dustB.points);
+
+// ============================================================
+// POST-PROCESSING
+// ============================================================
+const renderPass = new RenderPass(sceneA, camera);
+composer.addPass(renderPass);
+
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  0.6, // strength
+  0.4, // radius
+  0.85 // threshold
+);
+composer.addPass(bloomPass);
 
 // ============================================================
 // TEXT OVERLAY
@@ -354,9 +427,20 @@ function animate() {
 
   const t = performance.now() * 0.001;
 
-  // Animate balls
-  ball.position.y = 0.12 + Math.sin(t * 2) * 0.05;
-  ballB.position.y = 0.62 + Math.sin(t * 2 + 1) * 0.05;
+  // Update portal shader
+  portalMat.uniforms.time.value = t;
+
+  // Animate frame emissive pulse
+  frameMat.emissiveIntensity = 0.15 + Math.sin(t * 1.5) * 0.1;
+
+  // Portal glow pulse
+  portalGlow.intensity = 2 + Math.sin(t * 1.5) * 0.8;
+
+  // Animate balls with drift
+  ball.position.y = 0.12 + Math.sin(t * 2) * 0.08;
+  ball.position.x = -1.8 + Math.sin(t * 1.3) * 0.15;
+  ballB.position.y = 0.62 + Math.sin(t * 2 + 1) * 0.08;
+  ballB.position.x = 1.2 + Math.cos(t * 1.1) * 0.12;
 
   // Animate ocean waves
   const oPos = oceanGeo.attributes.position;
@@ -371,15 +455,17 @@ function animate() {
   oPos.needsUpdate = true;
   oceanGeo.computeVertexNormals();
 
-  // PASS 1: Render scene B to texture using the SAME camera
-  // (same position/rotation = true parallax through the portal)
+  // Animate dust
+  updateDust(dustA, t, 0.3);
+  updateDust(dustB, t, 0.2);
+
+  // PASS 1: Render scene B to texture
   renderer.setRenderTarget(portalRT);
   renderer.render(sceneB, camera);
 
-  // PASS 2: Render scene A to screen (portal plane samples scene B texture
-  // using screen-space UVs, so it looks like a real window)
+  // PASS 2: Render scene A with bloom to screen
   renderer.setRenderTarget(null);
-  renderer.render(sceneA, camera);
+  composer.render();
 }
 
 animate();
@@ -425,11 +511,57 @@ function createRailroad(scene) {
   }
 }
 
+function createDustParticles(count, color, opacity) {
+  const geo = new THREE.BufferGeometry();
+  const positions = new Float32Array(count * 3);
+  const speeds = new Float32Array(count * 3);
+
+  for (let i = 0; i < count; i++) {
+    positions[i * 3] = (Math.random() - 0.5) * 40;
+    positions[i * 3 + 1] = Math.random() * 12;
+    positions[i * 3 + 2] = (Math.random() - 0.5) * 40;
+    speeds[i * 3] = (Math.random() - 0.5) * 0.01;
+    speeds[i * 3 + 1] = 0.002 + Math.random() * 0.005;
+    speeds[i * 3 + 2] = (Math.random() - 0.5) * 0.01;
+  }
+
+  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+
+  const mat = new THREE.PointsMaterial({
+    color,
+    size: 0.08,
+    transparent: true,
+    opacity,
+    sizeAttenuation: true,
+    depthWrite: false,
+  });
+
+  return { points: new THREE.Points(geo, mat), speeds };
+}
+
+function updateDust(dust, time, speed) {
+  const pos = dust.points.geometry.attributes.position;
+  const spd = dust.speeds;
+  for (let i = 0; i < spd.length; i += 3) {
+    pos.array[i] += spd[i] * speed;
+    pos.array[i + 1] += spd[i + 1] * speed;
+    pos.array[i + 2] += spd[i + 2] * speed;
+    // Wrap
+    if (pos.array[i + 1] > 12) {
+      pos.array[i + 1] = 0;
+      pos.array[i] = (Math.random() - 0.5) * 40;
+      pos.array[i + 2] = (Math.random() - 0.5) * 40;
+    }
+  }
+  pos.needsUpdate = true;
+}
+
 // --- Resize ---
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
-  const dpr = Math.min(window.devicePixelRatio, 2);
-  portalRT.setSize(window.innerWidth * dpr, window.innerHeight * dpr);
+  composer.setSize(window.innerWidth, window.innerHeight);
+  const d = Math.min(window.devicePixelRatio, 2);
+  portalRT.setSize(window.innerWidth * d, window.innerHeight * d);
 });
