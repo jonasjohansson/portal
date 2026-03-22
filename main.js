@@ -479,6 +479,17 @@ document.body.appendChild(overlay);
 // RENDER LOOP — bidirectional portal
 // ============================================================
 let currentSide = "A"; // which world the camera is in
+let prevZ = camera.position.z;
+
+function isInsidePortalBounds() {
+  const x = camera.position.x;
+  const y = camera.position.y;
+  return (
+    Math.abs(x) < portalWidth / 2 &&
+    y > 0 &&
+    y < portalHeight
+  );
+}
 
 function animate() {
   requestAnimationFrame(animate);
@@ -490,12 +501,17 @@ function animate() {
   // Update portal shader
   portalMat.uniforms.time.value = t;
 
-  // Detect which side of the portal the camera is on
-  const onSideA = camera.position.z > portalZ;
-  currentSide = onSideA ? "A" : "B";
+  // Detect portal crossing — only swap if walking THROUGH the frame
+  const currZ = camera.position.z;
+  const crossed = (prevZ > portalZ && currZ <= portalZ) ||
+                  (prevZ < portalZ && currZ >= portalZ);
+  if (crossed && isInsidePortalBounds()) {
+    currentSide = currentSide === "A" ? "B" : "A";
+  }
+  prevZ = currZ;
 
-  const mainScene = onSideA ? sceneA : sceneB;
-  const portalScene = onSideA ? sceneB : sceneA;
+  const mainScene = currentSide === "A" ? sceneA : sceneB;
+  const portalScene = currentSide === "A" ? sceneB : sceneA;
 
   // Animate frame emissive pulse
   frameMatA.emissiveIntensity = 0.15 + Math.sin(t * 1.5) * 0.1;
