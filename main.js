@@ -42,7 +42,9 @@ function updateMovement() {
   camera.getWorldDirection(forward);
   forward.y = 0;
   forward.normalize();
-  const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
+  const right = new THREE.Vector3()
+    .crossVectors(forward, camera.up)
+    .normalize();
 
   const move = new THREE.Vector3();
   if (keys["KeyW"]) move.add(forward);
@@ -59,15 +61,24 @@ function updateMovement() {
   }
 }
 
-// --- Render target for scene B ---
+// --- Render target (shared for portal view) ---
 const dpr = Math.min(window.devicePixelRatio, 2);
 let portalRT = new THREE.WebGLRenderTarget(
   window.innerWidth * dpr,
   window.innerHeight * dpr
 );
 
-// --- Post-processing (bloom) ---
+// --- Post-processing ---
 const composer = new EffectComposer(renderer);
+const renderPass = new RenderPass(null, camera); // scene set dynamically
+composer.addPass(renderPass);
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  0.6,
+  0.4,
+  0.85
+);
+composer.addPass(bloomPass);
 
 // ============================================================
 // PORTAL DIMENSIONS
@@ -80,7 +91,81 @@ const portalY = portalHeight / 2;
 const portalZ = 0;
 
 // ============================================================
-// SCENE A — Desert world (outer)
+// Shared portal frame geometry
+// ============================================================
+const frameShape = new THREE.Shape();
+const hw = portalWidth / 2 + frameThickness;
+const hh = portalHeight / 2 + frameThickness;
+frameShape.moveTo(-hw, -hh);
+frameShape.lineTo(hw, -hh);
+frameShape.lineTo(hw, hh);
+frameShape.lineTo(-hw, hh);
+frameShape.lineTo(-hw, -hh);
+
+const holeShape = new THREE.Path();
+const ihw = portalWidth / 2;
+const ihh = portalHeight / 2;
+holeShape.moveTo(-ihw, -ihh);
+holeShape.lineTo(ihw, -ihh);
+holeShape.lineTo(ihw, ihh);
+holeShape.lineTo(-ihw, ihh);
+holeShape.lineTo(-ihw, -ihh);
+frameShape.holes.push(holeShape);
+
+const frameGeo = new THREE.ExtrudeGeometry(frameShape, {
+  depth: frameDepth,
+  bevelEnabled: true,
+  bevelThickness: 0.05,
+  bevelSize: 0.05,
+  bevelSegments: 2,
+});
+
+// Portal shader (shared, texture swapped dynamically)
+const portalMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tPortal: { value: portalRT.texture },
+    time: { value: 0 },
+  },
+  side: THREE.DoubleSide,
+  vertexShader: `
+    varying vec4 vClipPos;
+    varying vec2 vUv;
+    void main() {
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      vClipPos = gl_Position;
+      vUv = uv;
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tPortal;
+    uniform float time;
+    varying vec4 vClipPos;
+    varying vec2 vUv;
+    void main() {
+      vec2 uv = (vClipPos.xy / vClipPos.w) * 0.5 + 0.5;
+
+      // Chromatic aberration at edges
+      vec2 center = vUv - 0.5;
+      float dist = length(center);
+      float aberration = dist * 0.006 * (1.0 + sin(time * 1.5) * 0.5);
+
+      float r = texture2D(tPortal, uv + vec2(aberration, 0.0)).r;
+      float g = texture2D(tPortal, uv).g;
+      float b = texture2D(tPortal, uv - vec2(aberration, 0.0)).b;
+
+      // Edge glow
+      float edgeDist = min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y));
+      float edgeGlow = exp(-edgeDist * 20.0) * 0.25 * (1.0 + sin(time * 2.0) * 0.3);
+      vec3 glowColor = vec3(0.3, 0.5, 1.0);
+
+      vec3 color = vec3(r, g, b) + glowColor * edgeGlow;
+      gl_FragColor = vec4(color, 1.0);
+    }
+  `,
+});
+
+// ============================================================
+// SCENE A — Desert world
 // ============================================================
 const sceneA = new THREE.Scene();
 sceneA.fog = new THREE.FogExp2(0xb8764a, 0.012);
@@ -157,103 +242,34 @@ ball.position.set(-1.8, 0.12, 3);
 ball.castShadow = true;
 sceneA.add(ball);
 
-// --- Portal frame ---
-const frameMat = new THREE.MeshStandardMaterial({
+// Portal frame A (silver/blue)
+const frameMatA = new THREE.MeshStandardMaterial({
   color: 0xdddddd,
   roughness: 0.15,
   metalness: 0.9,
   emissive: 0x4488ff,
   emissiveIntensity: 0.15,
 });
+const frameMeshA = new THREE.Mesh(frameGeo, frameMatA);
+frameMeshA.position.set(0, portalY, portalZ - frameDepth / 2);
+frameMeshA.castShadow = true;
+frameMeshA.receiveShadow = true;
+sceneA.add(frameMeshA);
 
-const frameShape = new THREE.Shape();
-const hw = portalWidth / 2 + frameThickness;
-const hh = portalHeight / 2 + frameThickness;
-frameShape.moveTo(-hw, -hh);
-frameShape.lineTo(hw, -hh);
-frameShape.lineTo(hw, hh);
-frameShape.lineTo(-hw, hh);
-frameShape.lineTo(-hw, -hh);
+// Portal glow light A
+const portalGlowA = new THREE.PointLight(0x4488ff, 2, 15);
+portalGlowA.position.set(0, portalY, portalZ + 1);
+sceneA.add(portalGlowA);
 
-const holeShape = new THREE.Path();
-const ihw = portalWidth / 2;
-const ihh = portalHeight / 2;
-holeShape.moveTo(-ihw, -ihh);
-holeShape.lineTo(ihw, -ihh);
-holeShape.lineTo(ihw, ihh);
-holeShape.lineTo(-ihw, ihh);
-holeShape.lineTo(-ihw, -ihh);
-frameShape.holes.push(holeShape);
-
-const frameGeo = new THREE.ExtrudeGeometry(frameShape, {
-  depth: frameDepth,
-  bevelEnabled: true,
-  bevelThickness: 0.05,
-  bevelSize: 0.05,
-  bevelSegments: 2,
-});
-const frameMesh = new THREE.Mesh(frameGeo, frameMat);
-frameMesh.position.set(0, portalY, portalZ - frameDepth / 2);
-frameMesh.castShadow = true;
-frameMesh.receiveShadow = true;
-sceneA.add(frameMesh);
-
-// Portal glow light
-const portalGlow = new THREE.PointLight(0x4488ff, 2, 15);
-portalGlow.position.set(0, portalY, portalZ + 1);
-sceneA.add(portalGlow);
-
-// --- Portal plane (screen-space UV shader with chromatic aberration) ---
-const portalMat = new THREE.ShaderMaterial({
-  uniforms: {
-    tPortal: { value: portalRT.texture },
-    time: { value: 0 },
-  },
-  vertexShader: `
-    varying vec4 vClipPos;
-    varying vec2 vUv;
-    void main() {
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      vClipPos = gl_Position;
-      vUv = uv;
-    }
-  `,
-  fragmentShader: `
-    uniform sampler2D tPortal;
-    uniform float time;
-    varying vec4 vClipPos;
-    varying vec2 vUv;
-    void main() {
-      vec2 uv = (vClipPos.xy / vClipPos.w) * 0.5 + 0.5;
-
-      // Chromatic aberration at edges
-      vec2 center = vUv - 0.5;
-      float dist = length(center);
-      float aberration = dist * 0.006 * (1.0 + sin(time * 1.5) * 0.5);
-
-      float r = texture2D(tPortal, uv + vec2(aberration, 0.0)).r;
-      float g = texture2D(tPortal, uv).g;
-      float b = texture2D(tPortal, uv - vec2(aberration, 0.0)).b;
-
-      // Subtle edge glow
-      float edgeDist = min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y));
-      float edgeGlow = exp(-edgeDist * 20.0) * 0.25 * (1.0 + sin(time * 2.0) * 0.3);
-      vec3 glowColor = vec3(0.3, 0.5, 1.0);
-
-      vec3 color = vec3(r, g, b) + glowColor * edgeGlow;
-      gl_FragColor = vec4(color, 1.0);
-    }
-  `,
-});
-
-const portalMesh = new THREE.Mesh(
+// Portal plane A (shows scene B)
+const portalMeshA = new THREE.Mesh(
   new THREE.PlaneGeometry(portalWidth, portalHeight),
   portalMat
 );
-portalMesh.position.set(0, portalY, portalZ);
-sceneA.add(portalMesh);
+portalMeshA.position.set(0, portalY, portalZ);
+sceneA.add(portalMeshA);
 
-// --- Dust particles (scene A — warm) ---
+// Dust A
 const dustA = createDustParticles(300, 0xffcc88, 0.6);
 sceneA.add(dustA.points);
 
@@ -378,23 +394,36 @@ ballB.position.set(1.2, 0.62, 3);
 ballB.castShadow = true;
 sceneB.add(ballB);
 
-// Dust particles (scene B — cool)
+// Portal frame B (golden, warm glow — looking back to desert)
+const frameMatB = new THREE.MeshStandardMaterial({
+  color: 0xc8a96e,
+  roughness: 0.15,
+  metalness: 0.9,
+  emissive: 0xff8844,
+  emissiveIntensity: 0.15,
+});
+const frameMeshB = new THREE.Mesh(frameGeo.clone(), frameMatB);
+frameMeshB.position.set(0, portalY, portalZ - frameDepth / 2);
+frameMeshB.castShadow = true;
+frameMeshB.receiveShadow = true;
+sceneB.add(frameMeshB);
+
+// Portal glow light B (warm)
+const portalGlowB = new THREE.PointLight(0xff8844, 2, 15);
+portalGlowB.position.set(0, portalY, portalZ + 1);
+sceneB.add(portalGlowB);
+
+// Portal plane B (shows scene A when looking back)
+const portalMeshB = new THREE.Mesh(
+  new THREE.PlaneGeometry(portalWidth, portalHeight),
+  portalMat
+);
+portalMeshB.position.set(0, portalY, portalZ);
+sceneB.add(portalMeshB);
+
+// Dust B
 const dustB = createDustParticles(300, 0x88ccff, 0.4);
 sceneB.add(dustB.points);
-
-// ============================================================
-// POST-PROCESSING
-// ============================================================
-const renderPass = new RenderPass(sceneA, camera);
-composer.addPass(renderPass);
-
-const bloomPass = new UnrealBloomPass(
-  new THREE.Vector2(window.innerWidth, window.innerHeight),
-  0.6, // strength
-  0.4, // radius
-  0.85 // threshold
-);
-composer.addPass(bloomPass);
 
 // ============================================================
 // TEXT OVERLAY
@@ -447,8 +476,10 @@ overlay.appendChild(
 document.body.appendChild(overlay);
 
 // ============================================================
-// RENDER LOOP
+// RENDER LOOP — bidirectional portal
 // ============================================================
+let currentSide = "A"; // which world the camera is in
+
 function animate() {
   requestAnimationFrame(animate);
   updateMovement();
@@ -459,13 +490,22 @@ function animate() {
   // Update portal shader
   portalMat.uniforms.time.value = t;
 
+  // Detect which side of the portal the camera is on
+  const onSideA = camera.position.z > portalZ;
+  currentSide = onSideA ? "A" : "B";
+
+  const mainScene = onSideA ? sceneA : sceneB;
+  const portalScene = onSideA ? sceneB : sceneA;
+
   // Animate frame emissive pulse
-  frameMat.emissiveIntensity = 0.15 + Math.sin(t * 1.5) * 0.1;
+  frameMatA.emissiveIntensity = 0.15 + Math.sin(t * 1.5) * 0.1;
+  frameMatB.emissiveIntensity = 0.15 + Math.sin(t * 1.5) * 0.1;
 
   // Portal glow pulse
-  portalGlow.intensity = 2 + Math.sin(t * 1.5) * 0.8;
+  portalGlowA.intensity = 2 + Math.sin(t * 1.5) * 0.8;
+  portalGlowB.intensity = 2 + Math.sin(t * 1.5) * 0.8;
 
-  // Animate balls with drift
+  // Animate balls
   ball.position.y = 0.12 + Math.sin(t * 2) * 0.08;
   ball.position.x = -1.8 + Math.sin(t * 1.3) * 0.15;
   ballB.position.y = 0.62 + Math.sin(t * 2 + 1) * 0.08;
@@ -488,12 +528,13 @@ function animate() {
   updateDust(dustA, t, 0.3);
   updateDust(dustB, t, 0.2);
 
-  // PASS 1: Render scene B to texture
+  // PASS 1: Render the OTHER scene (seen through portal) to texture
   renderer.setRenderTarget(portalRT);
-  renderer.render(sceneB, camera);
+  renderer.render(portalScene, camera);
 
-  // PASS 2: Render scene A with bloom to screen
+  // PASS 2: Render the CURRENT scene (where camera is) to screen with bloom
   renderer.setRenderTarget(null);
+  renderPass.scene = mainScene;
   composer.render();
 }
 
@@ -575,7 +616,6 @@ function updateDust(dust, time, speed) {
     pos.array[i] += spd[i] * speed;
     pos.array[i + 1] += spd[i + 1] * speed;
     pos.array[i + 2] += spd[i + 2] * speed;
-    // Wrap
     if (pos.array[i + 1] > 12) {
       pos.array[i + 1] = 0;
       pos.array[i] = (Math.random() - 0.5) * 40;
